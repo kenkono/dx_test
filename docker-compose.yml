@@ -1,0 +1,113 @@
+version: '3.9'
+services:
+  # MySQLデータベースサーバー（メタデータ保存用）
+  mysql:
+    platform: linux/x86_64
+    build:
+      context: mysql_build
+      dockerfile: Dockerfile
+    volumes:
+      - ./mysql/data:/var/lib/mysql  # MySQLデータの永続化
+      - ./hiveddls:/docker-entrypoint-initdb.d  # 初期化スクリプト
+      - ./share/my.cnf:/etc/mysql/conf.d/my.cnf  # 設定ファイル
+    restart: always  # コンテナが停止した場合に自動で再起動
+    environment:
+      MYSQL_DATABASE: metastore  # 初期データベース名
+      MYSQL_ROOT_PASSWORD: root  # rootユーザーのパスワード
+    container_name: db_mysql_big  # コンテナ名
+    networks:
+      - app-net-big
+  
+  # Kafkaサーバー（ストリーミング用）
+  kafka:
+    build: ./files/kafka  # Kafkaのビルドコンテキスト
+    command: sh /etc/rc.local/start_up.sh  # Kafkaのスタートアップスクリプト
+    container_name: kafka_big  # コンテナ名
+    networks:
+      - app-net-big
+
+  # ワーキングコンテナ（データ処理・ETL作業用）
+  workspace:
+    build: ./files  # ワーキングコンテナのビルドコンテキスト
+    command: sleep infinity  # 無限スリープで待機
+    volumes:
+      - ./files/digdag:/root  # 作業ディレクトリのマウント
+      - ./data/digdag_tmp:/tmp  # 一時ファイル保存用ディレクトリ
+    depends_on:
+      - mysql  # MySQLコンテナの起動を待機
+      - digdagdb  # Digdagデータベースコンテナの起動を待機
+    ports:
+      - "65432:65432"  # ポートマッピング
+    entrypoint: >
+      sh -c "chmod 755 /root/startup.sh && /root/startup.sh && /bin/bash"  # 初期スクリプトとbashシェルを起動
+    container_name: pyspark_big  # コンテナ名
+    networks:
+      - app-net-big
+  
+  # Node.jsアプリケーションコンテナ（Webサーバー用）
+  nodejs:
+    build: ./files/nodejs  # Node.jsコンテナのビルドコンテキスト
+    command: node /usr/src/app/express.js  # Express.jsアプリケーションを起動
+    container_name: nodejs_big  # コンテナ名
+    ports:
+      - 3001:3001  # ポートマッピング
+    networks:
+      - app-net-big
+
+  # Metabaseコンテナ（BIツール用）
+  metabase:
+    image: metabase/metabase:v0.42.3  # Metabaseのイメージ
+    env_file: ./files/postgres/envbi  # 環境変数を定義するファイル
+    volumes:
+      - ./data/metabase-data:/metabase-data  # Metabaseデータの永続化
+    ports:
+      - 3000:3000  # ポートマッピング
+    depends_on:
+      - postgres-mb  # PostgreSQLコンテナの起動を待機
+    container_name: metabase_bi_big  # コンテナ名
+    networks:
+      - app-net-big
+
+  # PostgreSQLデータベース（Metabase用バックエンド）
+  postgres-mb:
+    build: ./files/postgres  # PostgreSQLコンテナのビルドコンテキスト
+    volumes:
+      - ./data/postgres-data:/var/lib/postgresql/data  # データ永続化
+      - ./files/posgreinit:/docker-entrypoint-initdb.d  # 初期化スクリプト
+    env_file: ./files/postgres/envbi  # 環境変数を定義するファイル
+    ports:
+      - 5432:5432  # ポートマッピング
+    container_name: metabase_postgres_big  # コンテナ名
+    networks:
+      - app-net-big
+
+  # Digdag用PostgreSQLデータベース（ETLツール用）
+  digdagdb:
+    build: ./files/postgres  # PostgreSQLコンテナのビルドコンテキスト
+    volumes:
+      - ./data/postgres-data3:/var/lib/postgresql/data  # データ永続化
+    env_file: ./files/postgres/envdigdag  # 環境変数を定義するファイル
+    ports:
+      - 5434:5434  # ポートマッピング
+    command: -p 5434  # 使用するポートの指定
+    tty: true  # TTYを割り当てる
+    container_name: postgres_etl_big  # コンテナ名
+    networks:
+      - app-net-big
+
+  # 整形データ格納用PostgreSQLデータベース
+  postgres-data:
+    build: ./files/postgres  # PostgreSQLコンテナのビルドコンテキスト
+    volumes:
+      - ./data/postgres-data2:/var/lib/postgresql/data  # データ永続化
+    env_file: ./files/postgres/env2  # 環境変数を定義するファイル
+    ports:
+      - 5433:5433  # ポートマッピング
+    command: -p 5433  # 使用するポートの指定
+    container_name: postgres_data_big  # コンテナ名
+    networks:
+      - app-net-big
+
+networks:
+  app-net-big:
+    driver: bridge  # ブリッジネットワークドライバを使用
